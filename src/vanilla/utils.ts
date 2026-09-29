@@ -22,3 +22,6 @@ export type {
 export { hydrateStorageAtoms } from './utils/hydrateStorageAtoms';
 export { withStorageMigration } from './utils/withStorageMigration';
 export type { Migrate } from './utils/withStorageMigration';
+export { traceAtomUpdates } from './utils/traceAtomUpdates';
+export type { AtomTraceEvent } from './utils/traceAtomUpdates';
+export { atomEffect } from './utils/atomEffect';

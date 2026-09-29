@@ -115,6 +115,19 @@ const unsub = store.sub(countAtom, () => console.log('changed'));
 
 Use a `Provider` per screen/modal to scope state, or a shared store to read and write atoms outside React (push-notification handlers, background tasks, deep-link handlers).
 
+### Multi-atom transactions
+
+`store.set()` already batches propagation *within* one write (diamond-safe, each dependent recomputed once). `store.transaction(fn)` extends that same batching *across* multiple `set()` calls: listeners fire once with the final combined state, and a downstream atom that depends on several of the writes recomputes once, not once per write. Jotai's maintainers explicitly declined to add this to core (pushed to the third-party `jotai-transaction` package instead) — here it's a small, contained extension of the existing batching, not new architecture.
+
+```ts
+store.transaction(() => {
+  store.set(firstNameAtom, 'Ada');
+  store.set(lastNameAtom, 'Lovelace'); // fullNameAtom depends on both —
+});                                    // it recomputes once, not twice
+```
+
+Nestable (an inner `transaction()` just extends the outer one). `fn` must be synchronous — writes made after an `await` inside it happen outside the transaction.
+
 ---
 
 ## Utilities
@@ -140,6 +153,8 @@ All exported from `expo-atoms` (and framework-free from `expo-atoms/vanilla`).
 | `appStateAtom` | Live `AppState` (`active`, `background`, …) |
 | `colorSchemeAtom` | Live device color scheme |
 | `flushStorageOnBackground(store, storages)` | Best-effort flush for storages that batch writes internally |
+| `atomEffect((get, set) => cleanup?)` | Imperative side effect that tracks atoms and re-runs on change, without a component |
+| `traceAtomUpdates(store, onTrace)` | Dev-mode "why did this change" causality trace |
 
 ### Persistence with AsyncStorage
 
@@ -288,6 +303,69 @@ flushStorageOnBackground(getDefaultStore(), [myBatchingStorage]);
 
 This is best-effort, not a guarantee — `AppState`'s background event doesn't grant extra execution time, so there's no pure-JS way to guarantee an in-flight write completes before the OS terminates the process.
 
+### Side effects with `atomEffect`
+
+Mirrors the popular third-party `jotai-effect` package's `atomEffect`: run an imperative side effect that watches one or more atoms and re-runs when they change, without needing a component to read a value — syncing state to an external system, logging, analytics.
+
+```ts
+import { atomEffect } from 'expo-atoms';
+
+const syncTitleEffect = atomEffect((get, set) => {
+  const count = get(unreadCountAtom); // tracked, like any derived atom's read
+  document.title = count > 0 ? `(${count}) Inbox` : 'Inbox';
+  set(lastSyncedAtAtom, Date.now()); // effects can write other atoms too
+
+  return () => {
+    // optional cleanup, called before the next run and on unmount
+  };
+});
+
+useAtom(syncTitleEffect); // mount it to start; unmount stops it and runs the last cleanup
+```
+
+Outside React, `store.sub(syncTitleEffect, () => {})` starts it the same way.
+
+### Dev-mode causality trace
+
+The single most-requested, still-unsolved debugging gap in the Jotai ecosystem (`pmndrs/jotai#931` — years old, still open, not solved even by the official `jotai-devtools` package) is "which atom write caused this downstream atom to recompute?" `traceAtomUpdates` surfaces exactly that, using the reverse-dependency graph the store already computes internally on every `set()`:
+
+```ts
+import { traceAtomUpdates, getDefaultStore } from 'expo-atoms';
+
+if (__DEV__) {
+  traceAtomUpdates(getDefaultStore(), ({ cause, effects }) => {
+    console.log(`[trace] set(${cause}) recomputed:`, effects.map(String));
+  });
+}
+```
+
+Reports multi-hop causality (A causes B causes C) and diamond-shaped graphs (one write, several independent downstream effects), each atom listed once. Set `atom.debugLabel` so the trace prints readable names. Zero overhead when no handler is registered — the store only tracks recomputes while at least one is.
+
+### Testing
+
+`expo-atoms/test-utils` is a separate entry point (not re-exported from `expo-atoms` or `expo-atoms/vanilla`) so test-only code never bloats a production bundle:
+
+```ts
+import { createTestStore, flushMicrotasks, waitFor } from 'expo-atoms/test-utils';
+
+let store: ReturnType<typeof createTestStore>;
+beforeEach(() => {
+  store = createTestStore(); // the "fresh createStore() per test" convention, packaged
+});
+
+test('increments', () => {
+  store.set(countAtom, (c) => c + 1);
+  expect(store.get(countAtom)).toBe(1);
+});
+
+test('settles an async atom', async () => {
+  store.set(userIdAtom, 2);
+  const user = await waitFor(store, userAtom, (u) => u.id === 2);
+  expect(user.name).toBe('Ada');
+  // or, for a bare microtask flush: await flushMicrotasks();
+});
+```
+
 ---
 
 ## Expo Go & `expo-updates`
@@ -310,7 +388,7 @@ Tip: set `atom.debugLabel = 'count'` to get readable names in `String(atom)` whi
 
 ## Roadmap
 
-See [PLAN.md](./PLAN.md) for the full, sourced improvement roadmap this release came from — what's shipped, and what's planned next (multi-atom transactions, an `atomEffect`-style utility, undo/redo, dev-mode debugging, official test helpers, and more).
+See [PLAN.md](./PLAN.md) for the full, sourced improvement roadmap this release came from — what's shipped, and what's planned next (undo/redo, circular-dependency detection, per-key `atomFamily` generics, an Expo Router–synced atom, a Reanimated bridge, offline-first sync, and more).
 
 ## Migrating from Jotai
 
@@ -321,6 +399,9 @@ The API intentionally mirrors [Jotai](https://github.com/pmndrs/jotai): replace 
 - `atomWithStorage` with async storage hydrates without suspending.
 - `withStorageMigration` upgrades old persisted shapes instead of discarding them; `hydrateStorageAtoms` awaits persisted atoms before first paint.
 - Includes React Native–aware atoms (`appStateAtom`, `colorSchemeAtom`) and `flushStorageOnBackground`.
+- `store.transaction(fn)` batches multiple `set()` calls — jotai-core declined this, delegating to the third-party `jotai-transaction` package.
+- `atomEffect` (mirrors the third-party `jotai-effect` package) and `traceAtomUpdates` (a dev-mode causality trace, still unsolved even in `jotai-devtools`) are built in.
+- Official test helpers ship from `expo-atoms/test-utils`.
 - Ships a dual CJS/ESM build with an explicit `react-native` export condition.
 - The internal `INTERNAL_*` / store-hook APIs are not exposed.
 

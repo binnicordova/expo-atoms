@@ -1,6 +1,10 @@
 import { defineConfig } from 'tsup';
 
-const entry = { index: 'src/index.ts', vanilla: 'src/vanilla.ts' };
+const entry = {
+  index: 'src/index.ts',
+  vanilla: 'src/vanilla.ts',
+  testUtils: 'src/testUtils.ts',
+};
 
 const shared = {
   entry,
