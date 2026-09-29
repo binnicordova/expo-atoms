@@ -19,3 +19,6 @@ export type {
   AsyncStringStorage,
   SyncStringStorage,
 } from './utils/atomWithStorage';
+export { hydrateStorageAtoms } from './utils/hydrateStorageAtoms';
+export { withStorageMigration } from './utils/withStorageMigration';
+export type { Migrate } from './utils/withStorageMigration';

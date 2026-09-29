@@ -1,18 +1,25 @@
 {
   "name": "expo-atoms",
-  "version": "0.1.0",
-  "description": "Primitive and flexible atomic state management for Expo & React Native. 100% TypeScript, no native code \u2014 works in Expo Go and expo-updates on iOS, Android and web.",
-  "main": "build/index.js",
-  "react-native": "build/index.js",
-  "types": "build/index.d.ts",
+  "version": "0.1.1",
+  "description": "Primitive and flexible atomic state management for Expo & React Native. 100% TypeScript, no native code — works in Expo Go and expo-updates on iOS, Android and web.",
+  "main": "./build/cjs/index.js",
+  "module": "./build/esm/index.js",
+  "react-native": "./build/cjs/index.js",
+  "types": "./build/index.d.ts",
   "exports": {
     ".": {
       "types": "./build/index.d.ts",
-      "default": "./build/index.js"
+      "react-native": "./build/cjs/index.js",
+      "import": "./build/esm/index.js",
+      "require": "./build/cjs/index.js",
+      "default": "./build/cjs/index.js"
     },
     "./vanilla": {
       "types": "./build/vanilla.d.ts",
-      "default": "./build/vanilla.js"
+      "react-native": "./build/cjs/vanilla.js",
+      "import": "./build/esm/vanilla.js",
+      "require": "./build/cjs/vanilla.js",
+      "default": "./build/cjs/vanilla.js"
     },
     "./package.json": "./package.json"
   },
@@ -39,7 +46,8 @@
     "lint": "eslint src/",
     "test": "node internal/module_scripts/test.js",
     "prepare": "node internal/module_scripts/prepare.js",
-    "prepublishOnly": "CI=1 bun run lint && CI=1 bun run test && bun run prepare",
+    "verify-build": "node internal/module_scripts/verifyBuild.js",
+    "prepublishOnly": "CI=1 bun run lint && CI=1 bun run test && bun run prepare && bun run verify-build",
     "example": "cd example && bunx expo start",
     "example:ios": "cd example && bunx expo start --ios",
     "example:android": "cd example && bunx expo start --android",
@@ -96,6 +104,7 @@
     "react": "19.3.0",
     "react-native": "0.88.0-rc.2",
     "react-test-renderer": "19.3.0",
+    "tsup": "^8.5.1",
     "typescript": "^5.9.2"
   },
   "peerDependencies": {

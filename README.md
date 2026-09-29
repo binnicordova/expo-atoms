@@ -131,12 +131,15 @@ All exported from `expo-atoms` (and framework-free from `expo-atoms/vanilla`).
 | `atomWithLazy(() => init)` | Lazily computed initial value, once per store |
 | `selectAtom(atom, selector, eq?)` | Subscribe to a slice |
 | `splitAtom(arrayAtom, keyOf?)` | One atom per list item — rows re-render independently |
-| `atomFamily((param) => atom, eq?)` | Memoized atom per param (e.g. per id) |
+| `atomFamily((param) => atom, eq?, { maxSize? })` | Memoized atom per param (e.g. per id), optional LRU eviction |
 | `loadable(asyncAtom)` | `{ state: 'loading' \| 'hasData' \| 'hasError' }`, never suspends |
 | `unwrap(asyncAtom, fallback?)` | Sync view of an async atom |
 | `freezeAtom(atom)` | Deep-freeze values to catch mutations |
+| `withStorageMigration({ version, migrate })` | Upgrade old persisted shapes instead of discarding them |
+| `hydrateStorageAtoms(store, atoms)` | Await persisted atoms before first paint (splash screen) |
 | `appStateAtom` | Live `AppState` (`active`, `background`, …) |
 | `colorSchemeAtom` | Live device color scheme |
+| `flushStorageOnBackground(store, storages)` | Best-effort flush for storages that batch writes internally |
 
 ### Persistence with AsyncStorage
 
@@ -165,12 +168,65 @@ import 'expo-sqlite/localStorage/install';
 const themeAtom = atomWithStorage('theme', 'system'); // default storage = localStorage
 ```
 
+**MMKV (custom dev client only).** `react-native-mmkv` ships native code, so it
+requires `expo-dev-client` / an EAS dev build — it does **not** run in Expo Go,
+and `expo-atoms` never adds it as a dependency. If your app already has a dev
+client, it's a drop-in synchronous storage:
+
+```ts
+import { MMKV } from 'react-native-mmkv'; // requires a custom dev client, not Expo Go
+import { atomWithStorage, createJSONStorage } from 'expo-atoms';
+
+const mmkv = new MMKV();
+const storage = createJSONStorage<Settings>(() => ({
+  getItem: (key) => mmkv.getString(key) ?? null,
+  setItem: (key, value) => mmkv.set(key, value),
+  removeItem: (key) => mmkv.delete(key),
+}));
+export const settingsAtom = atomWithStorage('settings', defaults, storage);
+```
+
+Wired as a sync storage, reads are genuinely synchronous end-to-end — no
+hydration delay, unlike an `AsyncStorage`-backed atom.
+
 Guard against persisted shapes that changed between releases or OTA updates:
 
 ```ts
 import { withStorageValidator } from 'expo-atoms';
 const isSettings = (v: unknown): v is Settings => typeof v === 'object' && v !== null && 'units' in v;
 const settingsAtom = atomWithStorage('settings', defaults, withStorageValidator(isSettings)(storage));
+```
+
+Need to actually *upgrade* an old persisted shape instead of discarding it? `withStorageMigration` wraps a version envelope around stored data and calls `migrate` on anything older (un-versioned/legacy data is always version `0`). Compose it migrate-first, validator-outermost:
+
+```ts
+import { withStorageMigration, withStorageValidator } from 'expo-atoms';
+
+const settingsAtom = atomWithStorage(
+  'settings',
+  defaults,
+  withStorageValidator(isSettings)(
+    withStorageMigration<Settings>({
+      version: 2,
+      migrate: (persisted, version) =>
+        version === 0 ? { ...defaults, units: (persisted as { units: string }).units } : defaults,
+    })(storage)
+  )
+);
+```
+
+`migrate` must be synchronous, so a migration-wrapped sync storage (e.g. MMKV) stays fully synchronous — no hydration delay introduced.
+
+### Bootstrapping before first paint
+
+Async storage never suspends, but a splash screen still needs to know *when* persisted data has arrived. `hydrateStorageAtoms` awaits one or more `atomWithStorage` atoms (no-op for sync-backed atoms — there's nothing to await):
+
+```ts
+import { hydrateStorageAtoms, getDefaultStore } from 'expo-atoms';
+import * as SplashScreen from 'expo-splash-screen';
+
+await hydrateStorageAtoms(getDefaultStore(), [settingsAtom, sessionAtom]);
+await SplashScreen.hideAsync();
 ```
 
 ### Lists with `splitAtom`
@@ -222,6 +278,16 @@ const isForegroundAtom = atom((get) => get(appStateAtom) === 'active');
 const themeAtom = atom((get) => (get(colorSchemeAtom) === 'dark' ? darkTheme : lightTheme));
 ```
 
+`atomWithStorage` already writes through on every `set()`, so there's nothing to flush by default. If you compose a storage that batches or debounces writes itself, give it an optional `flush()` method and call `flushStorageOnBackground` once at startup so it runs when the app backgrounds:
+
+```ts
+import { flushStorageOnBackground, getDefaultStore } from 'expo-atoms';
+
+flushStorageOnBackground(getDefaultStore(), [myBatchingStorage]);
+```
+
+This is best-effort, not a guarantee — `AppState`'s background event doesn't grant extra execution time, so there's no pure-JS way to guarantee an in-flight write completes before the OS terminates the process.
+
 ---
 
 ## Expo Go & `expo-updates`
@@ -242,14 +308,20 @@ type Count = ExtractAtomValue<typeof countAtom>; // number
 
 Tip: set `atom.debugLabel = 'count'` to get readable names in `String(atom)` while debugging.
 
+## Roadmap
+
+See [PLAN.md](./PLAN.md) for the full, sourced improvement roadmap this release came from — what's shipped, and what's planned next (multi-atom transactions, an `atomEffect`-style utility, undo/redo, dev-mode debugging, official test helpers, and more).
+
 ## Migrating from Jotai
 
 The API intentionally mirrors [Jotai](https://github.com/pmndrs/jotai): replace `from 'jotai'`, `'jotai/utils'` and `'jotai/vanilla'` with `from 'expo-atoms'` (or `'expo-atoms/vanilla'`). Differences:
 
 - Everything (core + utils) is exported from one entry point.
-- `atomFamily` and `loadable` are included.
+- `atomFamily` (with optional `maxSize` LRU eviction) and `loadable` are included.
 - `atomWithStorage` with async storage hydrates without suspending.
-- Includes React Native–aware atoms (`appStateAtom`, `colorSchemeAtom`).
+- `withStorageMigration` upgrades old persisted shapes instead of discarding them; `hydrateStorageAtoms` awaits persisted atoms before first paint.
+- Includes React Native–aware atoms (`appStateAtom`, `colorSchemeAtom`) and `flushStorageOnBackground`.
+- Ships a dual CJS/ESM build with an explicit `react-native` export condition.
 - The internal `INTERNAL_*` / store-hook APIs are not exposed.
 
 ## Example app
@@ -267,10 +339,11 @@ The example resolves `expo-atoms` to `../src`, so edits to the library hot-reloa
 
 ```sh
 bun install
-bun run test        # jest (jest-expo preset)
+bun run test          # jest (jest-expo preset)
 bun run lint
 bun run typecheck
-bun run build       # emits ./build
+bun run build          # emits ./build (dual CJS/ESM via tsup + tsc declarations)
+bun run verify-build   # smoke-tests build/cjs and build/esm after a build
 ```
 
 ## Credits

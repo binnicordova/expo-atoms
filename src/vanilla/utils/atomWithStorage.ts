@@ -2,6 +2,7 @@ import { atom } from '../atom';
 import type { WritableAtom } from '../atom';
 import { isPromiseLike } from '../env';
 import { RESET } from './constants';
+import { registerStorageHydration } from './storageHydration';
 
 type Unsubscribe = () => void;
 
@@ -24,6 +25,13 @@ export interface AsyncStorage<Value> {
   setItem: (key: string, newValue: Value) => PromiseLike<void>;
   removeItem: (key: string) => PromiseLike<void>;
   subscribe?: Subscribe<Value>;
+  /**
+   * For storages that batch/debounce writes internally: flush pending
+   * writes early. Called by `flushStorageOnBackground` when the app
+   * backgrounds. Best-effort only — there is no pure-JS guarantee it
+   * completes before the OS terminates the process.
+   */
+  flush?: () => PromiseLike<void> | void;
 }
 
 export interface SyncStorage<Value> {
@@ -31,6 +39,8 @@ export interface SyncStorage<Value> {
   setItem: (key: string, newValue: Value) => void;
   removeItem: (key: string) => void;
   subscribe?: Subscribe<Value>;
+  /** @see AsyncStorage.flush */
+  flush?: () => PromiseLike<void> | void;
 }
 
 /** Shape of `@react-native-async-storage/async-storage` and similar. */
@@ -198,20 +208,6 @@ export function atomWithStorage<Value>(
     | { type: 'external'; value: Value }
     | { type: 'write'; value: Value };
 
-  const load = (apply: (value: Value) => void) => {
-    let value: Value | PromiseLike<Value>;
-    try {
-      value = storage.getItem(key, initialValue);
-    } catch {
-      return;
-    }
-    if (isPromiseLike(value)) {
-      value.then(apply, () => {});
-    } else {
-      apply(value);
-    }
-  };
-
   const internalAtom = atom<Internal, [Message], void>(
     { value: initialValue, written: false },
     (get, set, message) => {
@@ -234,17 +230,6 @@ export function atomWithStorage<Value>(
   );
   internalAtom.debugPrivate = true;
 
-  if (options?.getOnInit) {
-    internalAtom.unstable_onInit = (store) => {
-      load((value) => store.set(internalAtom, { type: 'load', value }));
-    };
-  }
-
-  internalAtom.onMount = (setAtom) => {
-    load((value) => setAtom({ type: 'load', value }));
-    return storage.subscribe?.(key, (value) => setAtom({ type: 'external', value }), initialValue);
-  };
-
   const anAtom = atom(
     (get) => get(internalAtom).value,
     (get, set, update: SetStateActionWithReset<Value>) => {
@@ -261,6 +246,34 @@ export function atomWithStorage<Value>(
     }
   );
 
+  const load = (apply: (value: Value) => void) => {
+    let value: Value | PromiseLike<Value>;
+    try {
+      value = storage.getItem(key, initialValue);
+    } catch {
+      return;
+    }
+    if (isPromiseLike(value)) {
+      registerStorageHydration(
+        anAtom,
+        value.then(apply, () => {})
+      );
+    } else {
+      apply(value);
+    }
+  };
+
+  if (options?.getOnInit) {
+    internalAtom.unstable_onInit = (store) => {
+      load((value) => store.set(internalAtom, { type: 'load', value }));
+    };
+  }
+
+  internalAtom.onMount = (setAtom) => {
+    load((value) => setAtom({ type: 'load', value }));
+    return storage.subscribe?.(key, (value) => setAtom({ type: 'external', value }), initialValue);
+  };
+
   return anAtom;
 }
 
@@ -274,12 +287,27 @@ export function withStorageValidator<Value>(validator: (value: unknown) => value
 };
 
 export function withStorageValidator<Value>(validator: (value: unknown) => value is Value) {
-  return (unknownStorage: AsyncStorage<unknown> | SyncStorage<unknown>) => ({
-    ...unknownStorage,
-    getItem: (key: string, initialValue: Value) => {
-      const validate = (value: unknown) => (validator(value) ? value : initialValue);
-      const value = unknownStorage.getItem(key, initialValue);
-      return isPromiseLike(value) ? value.then(validate) : validate(value);
-    },
-  });
+  return (unknownStorage: AsyncStorage<unknown> | SyncStorage<unknown>) => {
+    const subscribe: Subscribe<Value> = (key, callback, initialValue) =>
+      unknownStorage.subscribe?.(
+        key,
+        (value) => callback(validator(value) ? value : initialValue),
+        initialValue
+      );
+    // The cast is required, not just convenient: with two overridden members
+    // whose types independently vary between AsyncStorage/SyncStorage
+    // (getItem and subscribe), TS's overload-vs-implementation checker can't
+    // correlate them and rejects this even though it's correctly typed —
+    // verified separately that callers still get the right sync/async
+    // return type for `getItem` on each branch.
+    return {
+      ...unknownStorage,
+      getItem: (key: string, initialValue: Value) => {
+        const validate = (value: unknown) => (validator(value) ? value : initialValue);
+        const value = unknownStorage.getItem(key, initialValue);
+        return isPromiseLike(value) ? value.then(validate) : validate(value);
+      },
+      subscribe,
+    } as AsyncStorage<Value> | SyncStorage<Value>;
+  };
 }

@@ -24,12 +24,21 @@ export interface AtomFamily<Param, AtomType> {
  * Creates a function that returns the same atom for the same param
  * (compared with `areEqual`, default reference equality). Ideal for
  * per-id state such as `todoAtomFamily(id)`.
+ *
+ * With `options.maxSize`, the least-recently-used param is evicted (via the
+ * same path as `.remove()`, so `.subscribe()` still sees `REMOVE`) once the
+ * cache would grow past that size. Omitting it keeps the default unbounded
+ * behavior. Orthogonal to `setShouldRemove`; both can be used together.
  */
 export function atomFamily<Param, AtomType extends Atom<unknown>>(
   initializeAtom: (param: Param) => AtomType,
-  areEqual?: (a: Param, b: Param) => boolean
+  areEqual?: (a: Param, b: Param) => boolean,
+  options?: { maxSize?: number }
 ): AtomFamily<Param, AtomType> {
   let shouldRemove: ShouldRemove<Param> | null = null;
+  const maxSize = options?.maxSize;
+  // Insertion-ordered; touching a key re-inserts it at the "most recently
+  // used" end, so the front of the map is always the LRU eviction candidate.
   const atoms = new Map<Param, [AtomType, number]>();
   const listeners = new Set<(event: AtomFamilyEvent<Param, AtomType>) => void>();
 
@@ -49,11 +58,34 @@ export function atomFamily<Param, AtomType extends Atom<unknown>>(
     return NOT_FOUND;
   };
 
+  const touch = (key: Param) => {
+    if (maxSize === undefined) {
+      return;
+    }
+    const entry = atoms.get(key)!;
+    atoms.delete(key);
+    atoms.set(key, entry);
+  };
+
+  const evictIfNeeded = () => {
+    if (maxSize === undefined) {
+      return;
+    }
+    while (atoms.size > maxSize) {
+      const oldest = atoms.keys().next().value;
+      if (oldest === undefined) {
+        break;
+      }
+      createAtom.remove(oldest);
+    }
+  };
+
   const createAtom = ((param: Param) => {
     const key = findKey(param);
     if (key !== NOT_FOUND) {
       const [cachedAtom, createdAt] = atoms.get(key)!;
       if (!shouldRemove?.(createdAt, key)) {
+        touch(key);
         return cachedAtom;
       }
       createAtom.remove(key);
@@ -61,6 +93,7 @@ export function atomFamily<Param, AtomType extends Atom<unknown>>(
     const newAtom = initializeAtom(param);
     atoms.set(param, [newAtom, Date.now()]);
     notify({ type: 'CREATE', param, atom: newAtom });
+    evictIfNeeded();
     return newAtom;
   }) as AtomFamily<Param, AtomType>;
 

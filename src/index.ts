@@ -7,4 +7,4 @@
 export * from './vanilla/index';
 export * from './vanilla/utils';
 export * from './react/index';
-export { appStateAtom, colorSchemeAtom } from './native/index';
+export { appStateAtom, colorSchemeAtom, flushStorageOnBackground } from './native/index';

@@ -11,14 +11,32 @@ import {
   createJSONStorage,
   createStore,
   freezeAtom,
+  hydrateStorageAtoms,
   loadable,
   selectAtom,
   splitAtom,
   unwrap,
+  withStorageMigration,
   withStorageValidator,
 } from '../vanilla';
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
+
+const makeSyncStorage = () => {
+  const data = new Map<string, string>();
+  return {
+    data,
+    storage: {
+      getItem: (k: string) => data.get(k) ?? null,
+      setItem: (k: string, v: string) => {
+        data.set(k, v);
+      },
+      removeItem: (k: string) => {
+        data.delete(k);
+      },
+    },
+  };
+};
 
 describe('utils', () => {
   it('atomWithReset', () => {
@@ -183,23 +201,35 @@ describe('utils', () => {
     expect([...fam.getParams()]).toHaveLength(1);
   });
 
-  describe('atomWithStorage', () => {
-    const makeSyncStorage = () => {
-      const data = new Map<string, string>();
-      return {
-        data,
-        storage: {
-          getItem: (k: string) => data.get(k) ?? null,
-          setItem: (k: string, v: string) => {
-            data.set(k, v);
-          },
-          removeItem: (k: string) => {
-            data.delete(k);
-          },
-        },
-      };
-    };
+  describe('atomFamily maxSize', () => {
+    it('evicts the least-recently-used param once past maxSize', () => {
+      const fam = atomFamily((id: number) => atom(id), undefined, { maxSize: 2 });
+      const a = fam(1);
+      fam(2);
+      fam(1); // touch 1, so 2 becomes the LRU entry
+      fam(3); // pushes size to 3 -> evicts 2, not 1
+      expect([...fam.getParams()]).toEqual([1, 3]);
+      expect(fam(1)).toBe(a);
+    });
 
+    it('fires REMOVE via subscribe during automatic eviction', () => {
+      const fam = atomFamily((id: number) => atom(id), undefined, { maxSize: 1 });
+      const events: string[] = [];
+      fam.subscribe((e) => events.push(e.type));
+      fam(1);
+      fam(2);
+      expect(events).toEqual(['CREATE', 'CREATE', 'REMOVE']);
+      expect([...fam.getParams()]).toEqual([2]);
+    });
+
+    it('without maxSize, grows unbounded (default behavior unchanged)', () => {
+      const fam = atomFamily((id: number) => atom(id));
+      for (let i = 0; i < 5; i++) fam(i);
+      expect([...fam.getParams()]).toHaveLength(5);
+    });
+  });
+
+  describe('atomWithStorage', () => {
     it('persists with a sync string storage', () => {
       const { data, storage } = makeSyncStorage();
       data.set('theme', JSON.stringify('dark'));
@@ -281,6 +311,22 @@ describe('utils', () => {
       expect(store.get(n)).toBe(1);
     });
 
+    it('a sync storage value is available immediately, no await needed', () => {
+      // Names the invariant a fast synchronous backend (e.g. MMKV wired as a
+      // SyncStorage) relies on: store.sub() must not defer hydration to a
+      // microtask the way async storage intentionally does.
+      const { data, storage } = makeSyncStorage();
+      data.set('n', JSON.stringify(42));
+      const store = createStore();
+      const n = atomWithStorage(
+        'n',
+        0,
+        createJSONStorage<number>(() => storage)
+      );
+      store.sub(n, () => {});
+      expect(store.get(n)).toBe(42);
+    });
+
     it('getOnInit loads without mounting', async () => {
       const { data, storage } = makeSyncStorage();
       data.set('flag', 'true');
@@ -294,6 +340,236 @@ describe('utils', () => {
         }
       );
       expect(store.get(flag)).toBe(true);
+    });
+  });
+
+  describe('withStorageMigration', () => {
+    type SettingsV1 = { units: 'metric' | 'imperial' };
+    type SettingsV2 = { unitSystem: 'metric' | 'imperial' };
+
+    // Un-enveloped, pre-migration data is always reported as version 0.
+    const migrateV1ToV2 = (persisted: unknown, version: number): SettingsV2 => {
+      if (version === 0) {
+        return { unitSystem: (persisted as SettingsV1).units };
+      }
+      return { unitSystem: 'metric' };
+    };
+
+    it('migrates legacy un-versioned data on read, persists the new envelope on next write', () => {
+      const { data, storage } = makeSyncStorage();
+      data.set('settings', JSON.stringify({ units: 'imperial' })); // pre-migration shape, no envelope
+      const store = createStore();
+      const settings = atomWithStorage<SettingsV2>(
+        'settings',
+        { unitSystem: 'metric' },
+        withStorageMigration<SettingsV2>({ version: 2, migrate: migrateV1ToV2 })(
+          createJSONStorage(() => storage)
+        )
+      );
+      store.sub(settings, () => {});
+      expect(store.get(settings)).toEqual({ unitSystem: 'imperial' });
+
+      store.set(settings, { unitSystem: 'metric' });
+      expect(JSON.parse(data.get('settings')!)).toEqual({
+        __expoAtomsVersion: 2,
+        value: { unitSystem: 'metric' },
+      });
+    });
+
+    it('passes through current-version data without calling migrate', () => {
+      const { data, storage } = makeSyncStorage();
+      data.set(
+        'settings',
+        JSON.stringify({ __expoAtomsVersion: 2, value: { unitSystem: 'imperial' } })
+      );
+      const migrate = jest.fn(migrateV1ToV2);
+      const store = createStore();
+      const settings = atomWithStorage<SettingsV2>(
+        'settings',
+        { unitSystem: 'metric' },
+        withStorageMigration<SettingsV2>({ version: 2, migrate })(createJSONStorage(() => storage))
+      );
+      store.sub(settings, () => {});
+      expect(store.get(settings)).toEqual({ unitSystem: 'imperial' });
+      expect(migrate).not.toHaveBeenCalled();
+    });
+
+    it('never calls migrate on first launch (nothing persisted)', () => {
+      const { storage } = makeSyncStorage();
+      const migrate = jest.fn(migrateV1ToV2);
+      const store = createStore();
+      const settings = atomWithStorage<SettingsV2>(
+        'settings',
+        { unitSystem: 'metric' },
+        withStorageMigration<SettingsV2>({ version: 2, migrate })(createJSONStorage(() => storage))
+      );
+      store.sub(settings, () => {});
+      expect(store.get(settings)).toEqual({ unitSystem: 'metric' });
+      expect(migrate).not.toHaveBeenCalled();
+    });
+
+    it('composes with withStorageValidator: migrate first, then validate', () => {
+      const { data, storage } = makeSyncStorage();
+      data.set('settings', JSON.stringify({ units: 'imperial' }));
+      const isSettingsV2 = (v: unknown): v is SettingsV2 =>
+        typeof v === 'object' && v !== null && 'unitSystem' in v;
+      const store = createStore();
+      const settings = atomWithStorage<SettingsV2>(
+        'settings',
+        { unitSystem: 'metric' },
+        withStorageValidator(isSettingsV2)(
+          withStorageMigration<SettingsV2>({ version: 2, migrate: migrateV1ToV2 })(
+            createJSONStorage(() => storage)
+          )
+        )
+      );
+      store.sub(settings, () => {});
+      expect(store.get(settings)).toEqual({ unitSystem: 'imperial' });
+    });
+
+    it('falls back to initialValue when migrate throws', () => {
+      const { data, storage } = makeSyncStorage();
+      data.set('settings', JSON.stringify({ units: 'imperial' }));
+      const store = createStore();
+      const settings = atomWithStorage<SettingsV2>(
+        'settings',
+        { unitSystem: 'metric' },
+        withStorageMigration<SettingsV2>({
+          version: 2,
+          migrate: () => {
+            throw new Error('bad data');
+          },
+        })(createJSONStorage(() => storage))
+      );
+      store.sub(settings, () => {});
+      expect(store.get(settings)).toEqual({ unitSystem: 'metric' });
+    });
+
+    it('migrates legacy data through an async storage without suspending', async () => {
+      const data = new Map<string, string>([['settings', JSON.stringify({ units: 'imperial' })]]);
+      const asyncStorage = {
+        getItem: async (k: string) => data.get(k) ?? null,
+        setItem: async (k: string, v: string) => {
+          data.set(k, v);
+        },
+        removeItem: async (k: string) => {
+          data.delete(k);
+        },
+      };
+      const store = createStore();
+      const settings = atomWithStorage<SettingsV2>(
+        'settings',
+        { unitSystem: 'metric' },
+        withStorageMigration<SettingsV2>({ version: 2, migrate: migrateV1ToV2 })(
+          createJSONStorage(() => asyncStorage)
+        )
+      );
+      store.sub(settings, () => {});
+      expect(store.get(settings)).toEqual({ unitSystem: 'metric' }); // initial value, not suspended
+      await flush();
+      expect(store.get(settings)).toEqual({ unitSystem: 'imperial' });
+    });
+
+    it('migrates legacy data through a sync storage with no await needed', () => {
+      const { data, storage } = makeSyncStorage();
+      data.set('settings', JSON.stringify({ units: 'imperial' }));
+      const store = createStore();
+      const settings = atomWithStorage<SettingsV2>(
+        'settings',
+        { unitSystem: 'metric' },
+        withStorageMigration<SettingsV2>({ version: 2, migrate: migrateV1ToV2 })(
+          createJSONStorage(() => storage)
+        )
+      );
+      store.sub(settings, () => {});
+      expect(store.get(settings)).toEqual({ unitSystem: 'imperial' });
+    });
+  });
+
+  describe('hydrateStorageAtoms', () => {
+    it('resolves without needing flush() for sync-only atoms', async () => {
+      const { data, storage } = makeSyncStorage();
+      data.set('n', JSON.stringify(7));
+      const store = createStore();
+      const n = atomWithStorage(
+        'n',
+        0,
+        createJSONStorage<number>(() => storage)
+      );
+      await hydrateStorageAtoms(store, [n]);
+      expect(store.get(n)).toBe(7);
+    });
+
+    it('awaits a genuinely pending async getItem', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      const asyncStorage = {
+        getItem: async () => {
+          await gate;
+          return '"from-disk"';
+        },
+        setItem: async () => {},
+        removeItem: async () => {},
+      };
+      const store = createStore();
+      const a = atomWithStorage(
+        'k',
+        'init',
+        createJSONStorage<string>(() => asyncStorage)
+      );
+      const hydrated = hydrateStorageAtoms(store, [a]);
+      release();
+      await hydrated;
+      expect(store.get(a)).toBe('from-disk');
+    });
+
+    it('handles a mixed list of sync and async atoms', async () => {
+      const { data: syncData, storage: syncStorage } = makeSyncStorage();
+      syncData.set('s', JSON.stringify('sync-value'));
+      const asyncStorage = {
+        getItem: async () => '"async-value"',
+        setItem: async () => {},
+        removeItem: async () => {},
+      };
+      const store = createStore();
+      const s = atomWithStorage(
+        's',
+        '',
+        createJSONStorage<string>(() => syncStorage)
+      );
+      const a = atomWithStorage(
+        'a',
+        '',
+        createJSONStorage<string>(() => asyncStorage)
+      );
+      await hydrateStorageAtoms(store, [s, a]);
+      expect(store.get(s)).toBe('sync-value');
+      expect(store.get(a)).toBe('async-value');
+    });
+
+    it('no-ops for an atom not created by atomWithStorage', async () => {
+      const store = createStore();
+      const plain = atom(1);
+      await expect(hydrateStorageAtoms(store, [plain])).resolves.toBeUndefined();
+      expect(store.get(plain)).toBe(1);
+    });
+
+    it('does not leave atoms mounted afterward', async () => {
+      const cleanup = jest.fn();
+      const asyncStorage = {
+        getItem: async () => '"v"',
+        setItem: async () => {},
+        removeItem: async () => {},
+        subscribe: () => cleanup,
+      };
+      const store = createStore();
+      const a = atomWithStorage(
+        'k',
+        '',
+        createJSONStorage<string>(() => asyncStorage)
+      );
+      await hydrateStorageAtoms(store, [a]);
+      expect(cleanup).toHaveBeenCalledTimes(1);
     });
   });
 });
