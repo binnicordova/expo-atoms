@@ -55,3 +55,10 @@ yarn-error.log
 
 # Expo
 .expo/*
+
+# Expo example (Continuous Native Generation)
+example/ios/
+example/android/
+example/.expo/
+example/dist/
+*.tgz

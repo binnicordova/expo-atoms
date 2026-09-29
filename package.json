@@ -1,55 +1,120 @@
 {
   "name": "expo-atoms",
   "version": "0.1.0",
-  "description": "Primitive and flexible atomic state management for Expo & React Native — pure TypeScript, works in Expo Go on iOS, Android and web.",
+  "description": "Primitive and flexible atomic state management for Expo & React Native. 100% TypeScript, no native code \u2014 works in Expo Go and expo-updates on iOS, Android and web.",
   "main": "build/index.js",
+  "react-native": "build/index.js",
   "types": "build/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./build/index.d.ts",
+      "default": "./build/index.js"
+    },
+    "./vanilla": {
+      "types": "./build/vanilla.d.ts",
+      "default": "./build/vanilla.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "typesVersions": {
+    "*": {
+      "vanilla": [
+        "build/vanilla.d.ts"
+      ]
+    }
+  },
+  "sideEffects": false,
+  "files": [
+    "build",
+    "src",
+    "!src/**/__tests__",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "node internal/module_scripts/build.js",
     "clean": "node internal/module_scripts/clean.js",
+    "typecheck": "tsc --noEmit",
     "lint": "eslint src/",
     "test": "node internal/module_scripts/test.js",
     "prepare": "node internal/module_scripts/prepare.js",
-    "open:ios": "node internal/module_scripts/open-ios.js",
-    "open:android": "node internal/module_scripts/open-android.js"
+    "prepublishOnly": "CI=1 bun run lint && CI=1 bun run test && bun run prepare",
+    "example": "cd example && bunx expo start",
+    "example:ios": "cd example && bunx expo start --ios",
+    "example:android": "cd example && bunx expo start --android",
+    "example:web": "cd example && bunx expo start --web"
   },
   "keywords": [
     "react-native",
     "expo",
-    "expo-atoms",
-    "ExpoAtoms"
+    "expo-go",
+    "expo-updates",
+    "react",
+    "state",
+    "state-management",
+    "atom",
+    "atomic",
+    "jotai",
+    "recoil",
+    "hooks",
+    "typescript",
+    "ios",
+    "android",
+    "web"
   ],
-  "repository": "https://github.com/binnicordova/expo-atoms",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/binnicordova/expo-atoms.git"
+  },
   "bugs": {
     "url": "https://github.com/binnicordova/expo-atoms/issues"
   },
   "author": "Binni Cordova <binni.2000.cordova@gmail.com> (https://github.com/binnicordova)",
   "license": "MIT",
   "homepage": "https://github.com/binnicordova/expo-atoms#readme",
+  "publishConfig": {
+    "access": "public",
+    "provenance": false
+  },
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {},
   "devDependencies": {
     "@babel/core": "^7.26.0",
+    "@testing-library/react-native": "^14.0.1",
     "@types/jest": "^29.2.1",
-    "@types/react": "~19.1.1",
-    "babel-preset-expo": "~55.0.8",
+    "@types/react": "~19.2.18",
+    "babel-preset-expo": "~58.0.5",
     "eslint": "~9.39.4",
     "eslint-config-universe": "^15.0.3",
-    "expo": "^57.0.25",
+    "expo": "~58.0.0-preview.8",
     "jest": "^29.7.0",
-    "jest-expo": "~55.0.9",
+    "jest-expo": "~58.0.4",
     "prettier": "^3.0.0",
-    "react-native": "0.82.1",
+    "react": "19.3.0",
+    "react-native": "0.88.0-rc.2",
+    "react-test-renderer": "19.3.0",
     "typescript": "^5.9.2"
+  },
+  "peerDependencies": {
+    "react": ">=18.0.0",
+    "react-native": "*",
+    "expo": ">=58.0.0-0"
+  },
+  "peerDependenciesMeta": {
+    "react-native": {
+      "optional": true
+    },
+    "expo": {
+      "optional": true
+    }
   },
   "jest": {
     "preset": "jest-expo",
     "roots": [
       "<rootDir>/src"
     ]
-  },
-  "peerDependencies": {
-    "expo": "*",
-    "react": "*",
-    "react-native": "*"
   }
 }

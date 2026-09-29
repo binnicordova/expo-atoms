@@ -1,11 +1,11 @@
 {
   "expo": {
-    "name": "expo-atoms-example",
+    "name": "expo-atoms example",
     "slug": "expo-atoms-example",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "automatic",
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "expo.modules.atoms.example"
@@ -17,7 +17,6 @@
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
-      "predictiveBackGestureEnabled": false,
       "package": "expo.modules.atoms.example"
     },
     "web": {
