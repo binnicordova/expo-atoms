@@ -5,9 +5,10 @@
  * `src/` for hot-reload (see example/metro.config.js), so a broken `exports`
  * map or a stale/mis-extensioned bundle would otherwise ship undetected.
  *
- * The `./vanilla` entry (no react-native import) is fully executed under
- * plain Node for both formats — real coverage of the bundled store/atom
- * engine. The main `.` entry re-exports react-native APIs (`native/index.ts`),
+ * The `./vanilla` and `./test-utils` entries (neither imports react-native)
+ * are fully executed under plain Node for both formats — real coverage of
+ * the bundled store/atom engine and the test helpers. The main `.` entry
+ * re-exports react-native APIs (`native/index.ts`),
  * and react-native's own entry point uses Flow syntax that only Metro's
  * transformer strips — it cannot run under plain Node at all, with or
  * without expo-atoms in the picture (jest-expo's `native.test.ts` already
@@ -27,6 +28,15 @@ async function checkVanillaRoundtrip(label, mod) {
   assert.strictEqual(store.get(a), 1, `${label}: initial value`);
   store.set(a, 2);
   assert.strictEqual(store.get(a), 2, `${label}: set/get roundtrip`);
+}
+
+async function checkTestUtilsRoundtrip(label, mod) {
+  assert.strictEqual(typeof mod.createTestStore, 'function', `${label}: createTestStore export`);
+  assert.strictEqual(typeof mod.flushMicrotasks, 'function', `${label}: flushMicrotasks export`);
+  assert.strictEqual(typeof mod.waitFor, 'function', `${label}: waitFor export`);
+  const store = mod.createTestStore();
+  assert.strictEqual(typeof store.get, 'function', `${label}: createTestStore() returns a Store`);
+  await mod.flushMicrotasks();
 }
 
 function checkSyntax(label, file) {
@@ -57,6 +67,16 @@ async function main() {
   );
   await checkVanillaRoundtrip('esm/vanilla (import)', esmVanilla);
   console.log('ok - esm/vanilla (import): functional roundtrip');
+
+  const cjsTestUtils = require(path.join(process.cwd(), 'build/cjs/testUtils.js'));
+  await checkTestUtilsRoundtrip('cjs/testUtils (require)', cjsTestUtils);
+  console.log('ok - cjs/testUtils (require): functional roundtrip');
+
+  const esmTestUtils = await import(
+    'file://' + path.join(process.cwd(), 'build/esm/testUtils.js')
+  );
+  await checkTestUtilsRoundtrip('esm/testUtils (import)', esmTestUtils);
+  console.log('ok - esm/testUtils (import): functional roundtrip');
 
   checkSyntax('cjs/index', path.join(process.cwd(), 'build/cjs/index.js'));
   checkSyntax('esm/index', path.join(process.cwd(), 'build/esm/index.js'));

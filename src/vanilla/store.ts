@@ -16,6 +16,20 @@ export type Store = {
   ) => Result;
   /** Subscribe to changes of an atom. Mounts it (and its dependencies). */
   sub: (atom: Atom<unknown>, listener: () => void) => () => void;
+  /**
+   * Runs `fn`, deferring recompute + listener notification until it
+   * returns, so every `set()` call made inside it behaves like part of one
+   * atomic write: listeners fire once with the final combined state, and a
+   * downstream atom that depends on several of the writes recomputes once
+   * (not once per write) — the same diamond-safe batching a single `set()`
+   * call already does within itself, extended across multiple calls.
+   * Nestable: an inner `transaction()` just extends the outer one.
+   *
+   * `fn` must be synchronous (like `withStorageMigration`'s `migrate`) —
+   * writes made after an `await` inside `fn` happen outside the
+   * transaction and are not covered by this batching.
+   */
+  transaction: <Result>(fn: () => Result) => Result;
 };
 
 type AnyValue = unknown;
@@ -55,8 +69,22 @@ type Mounted = {
   u?: () => void;
 };
 
+/** A single `store.set()` call's cause and every atom recomputed downstream of it. */
+type TraceEvent = { cause: AnyAtom; effects: AnyAtom[] };
+type TraceHandler = (event: TraceEvent) => void;
+
 type StoreInternals = {
   registerAbortHandler: (promise: PromiseLike<unknown>, handler: () => void) => void;
+  /**
+   * @internal Used by `traceAtomUpdates` (dev-mode "why did this change"
+   * causality trace). Fires once per top-level `store.set()` call, with the
+   * atom passed to `set()` and every atom `recomputeInvalidatedAtoms`
+   * recomputed as a downstream effect of that write — multi-hop and
+   * diamond-shaped graphs included, each atom listed exactly once. A
+   * nested/re-entrant `store.set()` call (e.g. a listener that writes a
+   * different atom) is its own, separate event.
+   */
+  registerTraceHandler: (handler: TraceHandler) => () => void;
 };
 
 const storeInternalsMap = new WeakMap<Store, StoreInternals>();
@@ -122,6 +150,30 @@ export function createStore(): Store {
   // assigned right below; referenced lazily by onInit
   let store: Store;
 
+  // --- dev-mode causality trace (traceAtomUpdates) ---
+  // Empty whenever no trace handler is registered, so the hot path only
+  // ever pays for a `.length` check (see the `hasChangedDeps` branch in
+  // `recomputeInvalidatedAtoms` and `set`/`transaction` below) — no Set
+  // allocation, no extra work, when tracing isn't in use. The two stacks
+  // are parallel: `traceEffectsStack`'s top Set accumulates every atom
+  // recomputed for the batch currently committing (one `set()` call, or one
+  // whole `transaction()`); `traceCausesStack`'s top array accumulates the
+  // atom(s) passed to `set()` for that same batch — one for a plain `set()`
+  // call, possibly several for a `transaction()`. Only the outermost `set`/
+  // `transaction` call for a given batch pushes a frame; a `set()` nested
+  // inside an open transaction just appends itself to the existing top
+  // frame's causes instead of starting its own (its effects aren't known
+  // yet — recompute is deferred to the transaction's commit).
+  const traceHandlers = new Set<TraceHandler>();
+  const traceEffectsStack: Set<AnyAtom>[] = [];
+  const traceCausesStack: AnyAtom[][] = [];
+
+  // --- transactions (store.transaction) ---
+  // >0 while inside a `transaction()` call (nestable); `set()` accumulates
+  // into `changedAtoms` as usual but skips its own recompute + flush while
+  // this is nonzero, deferring both to the outermost `transaction()` call.
+  let transactionDepth = 0;
+
   const registerAbortHandler = (promise: PromiseLike<unknown>, handler: () => void) => {
     let handlers = abortHandlersMap.get(promise);
     if (!handlers) {
@@ -131,6 +183,13 @@ export function createStore(): Store {
       promise.then(cleanup, cleanup);
     }
     handlers.add(handler);
+  };
+
+  const registerTraceHandler = (handler: TraceHandler) => {
+    traceHandlers.add(handler);
+    return () => {
+      traceHandlers.delete(handler);
+    };
   };
 
   const abortPromise = (promise: PromiseLike<unknown>) => {
@@ -275,6 +334,9 @@ export function createStore(): Store {
         invalidatedAtoms.set(a, aState.n);
         readAtomState(a);
         mountDependencies(a);
+        if (traceEffectsStack.length) {
+          traceEffectsStack[traceEffectsStack.length - 1]!.add(a);
+        }
       }
       invalidatedAtoms.delete(a);
     }
@@ -553,12 +615,68 @@ export function createStore(): Store {
     get: (atom) => returnAtomValue(readAtomState(atom)),
     set: (atom, ...args) => {
       const prevChangedAtomsSize = changedAtoms.size;
+      // `isOutermost`: are we the boundary responsible for committing (not
+      // nested inside an open `transaction()`)? Only the outermost call
+      // recomputes/flushes and owns a trace frame; a `set()` nested inside
+      // a transaction just contributes its atom as an extra cause to the
+      // transaction's frame (if one is open) and otherwise defers entirely.
+      const isOutermost = transactionDepth === 0;
+      const tracing = isOutermost && traceHandlers.size > 0;
+      if (tracing) {
+        traceEffectsStack.push(new Set<AnyAtom>());
+        traceCausesStack.push([]);
+      }
       try {
         return writeAtomState(atom, args);
       } finally {
-        if (changedAtoms.size !== prevChangedAtomsSize) {
+        // A write that doesn't actually change anything (e.g. setting the
+        // same value) reports no trace event — nothing changed, nothing to
+        // explain — and doesn't count as a "cause" contributed to an
+        // enclosing transaction either.
+        const changed = changedAtoms.size !== prevChangedAtomsSize;
+        if (!isOutermost && changed && traceCausesStack.length) {
+          traceCausesStack[traceCausesStack.length - 1]!.push(atom);
+        }
+        if (isOutermost && changed) {
           recomputeInvalidatedAtoms();
           flushCallbacks();
+        }
+        if (tracing) {
+          const effects = traceEffectsStack.pop()!;
+          const causes = traceCausesStack.pop()!;
+          if (changed) {
+            causes.push(atom);
+          }
+          causes.forEach((cause) => {
+            const effectsForCause = [...effects].filter((effect) => effect !== cause);
+            traceHandlers.forEach((handler) => handler({ cause, effects: effectsForCause }));
+          });
+        }
+      }
+    },
+    transaction: (fn) => {
+      const isOutermost = transactionDepth === 0;
+      const tracing = isOutermost && traceHandlers.size > 0;
+      if (tracing) {
+        traceEffectsStack.push(new Set<AnyAtom>());
+        traceCausesStack.push([]);
+      }
+      transactionDepth++;
+      try {
+        return fn();
+      } finally {
+        transactionDepth--;
+        if (transactionDepth === 0) {
+          recomputeInvalidatedAtoms();
+          flushCallbacks();
+        }
+        if (tracing) {
+          const effects = traceEffectsStack.pop()!;
+          const causes = traceCausesStack.pop()!;
+          causes.forEach((cause) => {
+            const effectsForCause = [...effects].filter((effect) => effect !== cause);
+            traceHandlers.forEach((handler) => handler({ cause, effects: effectsForCause }));
+          });
         }
       }
     },
@@ -575,7 +693,7 @@ export function createStore(): Store {
       };
     },
   };
-  storeInternalsMap.set(store, { registerAbortHandler });
+  storeInternalsMap.set(store, { registerAbortHandler, registerTraceHandler });
   return store;
 }
 

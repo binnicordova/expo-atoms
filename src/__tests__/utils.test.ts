@@ -1,6 +1,7 @@
 import {
   RESET,
   atom,
+  atomEffect,
   atomFamily,
   atomWithDefault,
   atomWithLazy,
@@ -570,6 +571,114 @@ describe('utils', () => {
       );
       await hydrateStorageAtoms(store, [a]);
       expect(cleanup).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('atomEffect', () => {
+    it('runs once on mount, tracking whatever it reads', () => {
+      const store = createStore();
+      const a = atom(1);
+      const seen: number[] = [];
+      const effect = atomEffect((get) => {
+        seen.push(get(a));
+      });
+      store.sub(effect, () => {});
+      expect(seen).toEqual([1]);
+    });
+
+    it('re-runs when a tracked dependency changes, calling the previous cleanup first', () => {
+      const store = createStore();
+      const a = atom(1);
+      const log: string[] = [];
+      const effect = atomEffect((get) => {
+        const value = get(a);
+        log.push(`run:${value}`);
+        return () => log.push(`cleanup:${value}`);
+      });
+      store.sub(effect, () => {});
+      store.set(a, 2);
+      store.set(a, 3);
+      expect(log).toEqual(['run:1', 'cleanup:1', 'run:2', 'cleanup:2', 'run:3']);
+    });
+
+    it('does not re-run when an untracked atom changes', () => {
+      const store = createStore();
+      const a = atom(1);
+      const b = atom(100);
+      const runs = jest.fn();
+      const effect = atomEffect((get) => {
+        runs(get(a));
+      });
+      store.sub(effect, () => {});
+      runs.mockClear();
+      store.set(b, 200); // never read by the effect
+      expect(runs).not.toHaveBeenCalled();
+      store.set(a, 2);
+      expect(runs).toHaveBeenCalledTimes(1);
+      expect(runs).toHaveBeenCalledWith(2);
+    });
+
+    it('tracks dynamic dependencies, same as any derived atom', () => {
+      const store = createStore();
+      const useA = atom(true);
+      const a = atom('a');
+      const b = atom('b');
+      const runs = jest.fn();
+      const effect = atomEffect((get) => {
+        runs(get(useA) ? get(a) : get(b));
+      });
+      store.sub(effect, () => {});
+      store.set(useA, false);
+      runs.mockClear();
+      store.set(a, 'A'); // no longer a dependency
+      expect(runs).not.toHaveBeenCalled();
+      store.set(b, 'B');
+      expect(runs).toHaveBeenCalledTimes(1);
+      expect(runs).toHaveBeenCalledWith('B');
+    });
+
+    it('calls the final cleanup on unmount', () => {
+      const store = createStore();
+      const a = atom(1);
+      const cleanup = jest.fn();
+      const effect = atomEffect((get) => {
+        get(a);
+        return cleanup;
+      });
+      const unsub = store.sub(effect, () => {});
+      expect(cleanup).not.toHaveBeenCalled();
+      unsub();
+      expect(cleanup).toHaveBeenCalledTimes(1);
+    });
+
+    it('can set() other atoms as a side effect', () => {
+      const store = createStore();
+      const source = atom(1);
+      const mirror = atom(0);
+      const effect = atomEffect((get, set) => {
+        set(mirror, get(source) * 10);
+      });
+      store.sub(effect, () => {});
+      expect(store.get(mirror)).toBe(10);
+      store.set(source, 5);
+      expect(store.get(mirror)).toBe(50);
+    });
+
+    it('is isolated per store', () => {
+      const a = atom(1);
+      const log: string[] = [];
+      const effect = atomEffect((get) => {
+        log.push(`run:${get(a)}`);
+        return () => log.push('cleanup');
+      });
+      const s1 = createStore();
+      const s2 = createStore();
+      s1.sub(effect, () => {});
+      s2.sub(effect, () => {});
+      log.length = 0;
+      s1.set(a, 9); // only s1's copy of `a` changes
+      expect(log).toEqual(['cleanup', 'run:9']);
+      expect(s2.get(a)).toBe(1);
     });
   });
 });

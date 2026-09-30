@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.0
+
+### 🎉 New features
+
+- `store.transaction(fn)`: defers recompute + listener notification across multiple `set()` calls inside `fn` until it returns, so listeners fire once with the final combined state and a downstream atom that depends on several of the writes recomputes once instead of once per write. Nestable; `fn` must be synchronous. Jotai's maintainers explicitly declined this for jotai-core (pushed to the third-party `jotai-transaction` package).
+- `atomEffect((get, set) => cleanup?)`: runs an imperative side effect that tracks whatever atoms it reads and re-runs (cleaning up first) when a tracked atom changes; mount it via `useAtom`/`store.sub` to start it, unmount to stop it. Mirrors the third-party `jotai-effect` package.
+- `traceAtomUpdates(store, onTrace)`: dev-mode "why did this change" causality trace — reports, for each `store.set()` call, the atom written and every atom recomputed downstream of it (multi-hop and diamond-shaped graphs included, each listed once). Zero overhead while no handler is registered.
+- New `expo-atoms/test-utils` entry point: `createTestStore()`, `flushMicrotasks()` and `waitFor(store, atom, predicate, { timeout? })`, packaging the "fresh store per test" / manual flush conventions every test suite ends up hand-rolling. Never bundled into `expo-atoms` or `expo-atoms/vanilla`.
+
+### 🛠 Build & CI
+
+- `tsup.config.ts` and `package.json`'s `exports`/`typesVersions` gained a third entry point (`./test-utils`), wired identically to `./vanilla`; `verify-build` now round-trips it under both CJS and ESM too.
+
+### 📚 Docs
+
+- README: usage sections for transactions, `atomEffect`, `traceAtomUpdates`, and `expo-atoms/test-utils`, plus new rows in the Utilities table.
+- PLAN.md: added a `## Shipped in v0.2.0` section; removed these four items from `## Planned` and made its sort order explicit (Expo Go/OTA compatibility first, then evidenced developer demand), reordering the rest to match.
+
 ## 0.1.1
 
 ### 🎉 New features

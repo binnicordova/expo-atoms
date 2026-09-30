@@ -1,6 +1,6 @@
 {
   "name": "expo-atoms",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Primitive and flexible atomic state management for Expo & React Native. 100% TypeScript, no native code — works in Expo Go and expo-updates on iOS, Android and web.",
   "main": "./build/cjs/index.js",
   "module": "./build/esm/index.js",
@@ -21,12 +21,22 @@
       "require": "./build/cjs/vanilla.js",
       "default": "./build/cjs/vanilla.js"
     },
+    "./test-utils": {
+      "types": "./build/testUtils.d.ts",
+      "react-native": "./build/cjs/testUtils.js",
+      "import": "./build/esm/testUtils.js",
+      "require": "./build/cjs/testUtils.js",
+      "default": "./build/cjs/testUtils.js"
+    },
     "./package.json": "./package.json"
   },
   "typesVersions": {
     "*": {
       "vanilla": [
         "build/vanilla.d.ts"
+      ],
+      "test-utils": [
+        "build/testUtils.d.ts"
       ]
     }
   },
